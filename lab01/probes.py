@@ -24,8 +24,6 @@ from pathlib import Path
 from typing import Any
 import pdb
 import json
-import regex
-import os
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +94,7 @@ def _parse_link_line(line: str) -> dict[str, Any]:
         "gen": _GEN_BY_GTS.get(gts) if gts is not None else None,
     }
 
-def generate_interpretation_string(neg_speed, cap_speed, capability, negotiated):
+def generate_interpretation_string(neg_speed, cap_speed):
     if cap_speed > neg_speed:
         interpretation = (
             f"drive capable of Gen{capability['gen']}, link running at "
@@ -186,18 +184,21 @@ def probe_root_source(root: Path = Path("/")) -> dict[str, Any]:
         return unknown(src, "no root mount entry found in mount table")    
 
 
-    m = re.search("(^/dev/nvme)|(^/dev/mmcblk)|(^/dev/sd)", raw, re.MULTILINE)
+   # m = re.search("(^/dev/nvme)|(^/dev/mmcblk)|(^/dev/sd)", raw, re.MULTILINE)
+    m = re.search(r"^(\S+)\s+/\s", raw, re.MULTILINE)
     # searches every line to see if the start is one of the above three match groups
 
     if m == None:
         return unknown(src, "m is not a string")
 
-    if m.group() == "/dev/nvme":
-        return {"value": m.group(), "kind": "nvme", "source": src, "status": "ok"}
-    elif m.group() == "/dev/mmcblk" or m.group() == "/dev/sd":
-        return {"value": m.group(), "kind": "ssd", "source": src, "status": "ok"}
+    device = m.group(1)
+
+    if device.startswith("/dev/nvme"):
+        return {"value": device, "kind": "nvme", "source": src, "status": "ok"}
+    elif device.startswith("/dev/mmcblk") or device.startswith("/dev/sd"):
+        return {"value": device, "kind": "removable_or_sata", "source": src, "status": "ok"}
     else:
-        return unknown(src, "/dev not found")
+        return {"value": device, "kind": "other", "source": src, "status": "ok"}
 
 
 def probe_nvme_present(root: Path = Path("/")) -> dict[str, Any]:
@@ -210,24 +211,17 @@ def probe_nvme_present(root: Path = Path("/")) -> dict[str, Any]:
     """
 
     src = "/sys/block/nvme0n1"
-    value = os.path.exists(src)
 
-    if value == False:
-        return unknown(src, "/sys/block/nvme0n1 does not exist")   
+    present = (Path(root) / src.lstrip("/")).exists()
 
-    raw = read_text(os.path.join(src, "device/model"), "") # type: ignore
-    print(raw)
-    if not raw:
-        return unknown(src, "no root mount entry found in mount table")  
+    if not present:
+        return unknown(src, "/sys/block/nvme0n1 does not exist")
     
-    raw = raw.rstrip("\x00").strip()
+    model = read_text(root, "/sys/block/nvme0n1/device/model")   
 
-    if raw == None:
-        return unknown(src, "m is not a string")
-    else:
-        return {
-        "value": value,
-        "model": raw,
+    return {
+        "value": present,
+        "model": model,
         "source": src,
         "status": "ok",
     }
@@ -261,7 +255,68 @@ def probe_pcie_link(root: Path = Path("/"), lspci_output: str | None = None) -> 
     #         "status": "ok",
     #     }
 
-    raise NotImplementedError("probes.probe_pcie_link")
+    src = "lspci -vv"
+    text = lspci_output if lspci_output is not None else run(["lspci", "-vv"])
+
+    if not text:
+        return unknown(src, "unable to read lspci output")
+    blocks = text.split("\n\n")
+
+    nvme_block = None
+
+    for block in blocks:
+        if "Non-Volatile memory controller" in block:
+            nvme_block = block
+            break
+
+    if nvme_block is None:
+        nvme_block = text
+
+    lnkcap = None
+    lnksta = None
+
+    for line in nvme_block.splitlines():
+        line = line.strip()
+
+        if line.startswith("LnkCap:") and lnkcap is None:
+            lnkcap = line
+
+        if line.startswith("LnkSta:") and lnksta is None:
+            lnksta = line
+
+    if lnksta is None:
+        return unknown(src, "LnkSta not found")
+
+    negotiated = _parse_link_line(lnksta)
+
+    capability = None
+    if lnkcap is not None:
+        capability = _parse_link_line(lnkcap)
+
+    interpretation = None
+
+    if capability is not None:
+        if capability["gen"] is not None and negotiated["gen"] is not None:
+            if capability["gen"] > negotiated["gen"]:
+                interpretation = (
+                    f"drive capable of Gen{capability['gen']}, link running at "
+                    f"Gen{negotiated['gen']} — expected on this carrier board, "
+                    "whose M.2 Key-M slot is wired Gen3 x4"
+                )
+            else:
+                interpretation = (
+                    f"link running at its full capability, Gen{negotiated['gen']} "
+                    f"x{negotiated['width']}"
+                )
+
+    return {
+        "value": negotiated["raw"],
+        "negotiated": negotiated,
+        "capability": capability,
+        "interpretation": interpretation,
+        "source": src,
+        "status": "ok",
+    }
 
 def probe_thermal_zones(root: Path = Path("/")) -> dict[str, Any]:
     """Every thermal zone the kernel exposes, in degrees C.
@@ -271,14 +326,45 @@ def probe_thermal_zones(root: Path = Path("/")) -> dict[str, Any]:
     than once, and it is a good, cheap lesson in reading units before reading
     numbers.
     """
-    # return {
-    #     "value": ,
-    #     "zones": ,
-    #     "source": ,
-    #     "status": "ok",
-    # }
+    src = "/sys/class/thermal/thermal_zone*/temp"
+    base = Path(root) / "sys/class/thermal"
 
-    raise NotImplementedError("probes.probe_thermal_zones")
+    zones = []
+
+    for zone in base.glob("thermal_zone*"):
+        try:
+            zone_type = read_text(root, f"/sys/class/thermal/{zone.name}/type")
+            temp_raw = read_text(root, f"/sys/class/thermal/{zone.name}/temp")
+        except TypeError:
+            continue
+
+        if zone_type is None or temp_raw is None:
+            continue
+
+        try:
+            temp_c = int(temp_raw) / 1000
+        except ValueError:
+            continue
+
+        zones.append({
+            "zone": zone.name,
+            "type": zone_type,
+            "temp_c": temp_c,
+        })
+
+    if not zones:
+        return unknown(src, "no readable thermal zones found")
+
+    hottest = max(zone["temp_c"] for zone in zones)
+
+    return {
+        "value": hottest,
+        "zones": zones,
+        "source": src,
+        "status": "ok",
+    }
+
+    
 
 
 def probe_power_mode(root: Path = Path("/"), nvpmodel_output: str | None = None) -> dict[str, Any]:
@@ -289,33 +375,48 @@ def probe_power_mode(root: Path = Path("/"), nvpmodel_output: str | None = None)
     same model are usually reporting different power modes, and without this
     field there is no way to find that out after the fact.
     """
-    # return {
-    #     "value": ,
-    #     "mode_id": ,
-    #     "source": ,
-    #     "status": "ok",
-    # }
+    src = "nvpmodel -q"
+    text = nvpmodel_output if nvpmodel_output is not None else run(["nvpmodel", "-q"])
+
+    if not text:
+        return unknown(src, "unable to read nvpmodel output")
+
+    mode = re.search(r"NV Power Mode:\s*(.+)", text)
+    mode_id = re.search(r"^\s*(\d+)\s*$", text, re.MULTILINE)
+
+    if mode is None:
+        return unknown(src, "power mode name not found")
+
+    if mode_id is None:
+        return unknown(src, "power mode id not found")
+
+    return {
+        "value": mode.group(1).strip(),
+        "mode_id": int(mode_id.group(1)),
+        "source": src,
+        "status": "ok",
+    }
 
     raise NotImplementedError("probes.probe_power_mode")
 
 ## for debugging - uncomment the following lines for debugging.
-if __name__ == "__main__":
-    out = probe_nvme_present()
-    print(out)
+# if __name__ == "__main__":
+#     out = probe_power_mode()
+#     print(out)
 
 # for generating system_report.json
-# if __name__ == "__main__":
-#     report = {
-#         "module_model": probe_module_model(),
-#         "memory_total_kb": probe_memory_total_kb(),
-#         "root_source": probe_root_source(),
-#         "nvme_present": probe_nvme_present(),
-#         "pcie_link": probe_pcie_link(),
-#         "thermal_zones": probe_thermal_zones(),
-#         "power_mode": probe_power_mode(),
-#     }
+if __name__ == "__main__":
+    report = {
+        "module_model": probe_module_model(),
+        "memory_total_kb": probe_memory_total_kb(),
+        "root_source": probe_root_source(),
+        "nvme_present": probe_nvme_present(),
+        "pcie_link": probe_pcie_link(),
+        "thermal_zones": probe_thermal_zones(),
+        "power_mode": probe_power_mode(),
+    }
     
-#     path = "system_report.json"
-#     with open(path, "w", encoding="utf-8") as f:
-#         json.dump(report, f, indent=4)
+    path = "system_report.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=4)
 
