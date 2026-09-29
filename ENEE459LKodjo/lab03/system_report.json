@@ -1,0 +1,74 @@
+{
+    "warmup_boundary": {
+        "value": 1,
+        "source": "leading prefix above (1 + 0.5) x median of the run's second half",
+        "status": "ok",
+        "settled_rate_ms": 18.7506,
+        "threshold_ms": 28.1258,
+        "tolerance": 0.5,
+        "retained": 99
+    },
+    "summarize_setup": {
+        "n": 100,
+        "mean": 22.8892,
+        "std": 42.1364,
+        "min": 18.4833,
+        "max": 440.0368,
+        "p50": 18.6289,
+        "p95": 18.8517,
+        "p99": 23.847
+    },
+    "is_multimodal": {
+        "value": false,
+        "source": "widest trimmed gap >= 20.0x the median gap, with >= 10% of samples on each side",
+        "status": "ok",
+        "gap_ratio": 12.09,
+        "widest_gap_ms": 0.0294,
+        "typical_gap_ms": 0.00243,
+        "modes": [
+            {
+                "n": 60,
+                "share": 0.6,
+                "median_ms": 18.5807
+            },
+            {
+                "n": 40,
+                "share": 0.4,
+                "median_ms": 18.7848
+            }
+        ]
+    },
+    "probe_power_state": {
+        "value": "25W",
+        "source": "nvpmodel -q",
+        "status": "ok",
+        "mode_index": 1,
+        "jetson_clocks": false,
+        "jetson_clocks_source": {
+            "value": "scaling_min_freq=729600, scaling_max_freq=1344000",
+            "source": "sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq vs sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
+            "status": "ok"
+        }
+    },
+    "probe_telemetry": {
+        "temperature_c": {
+            "value": 52.38,
+            "source": "sys/devices/virtual/thermal/*/temp",
+            "status": "ok",
+            "zone": "gpu-thermal",
+            "zones_read": 6
+        },
+        "power_mw": {
+            "value": null,
+            "source": "sys/bus/i2c/drivers/ina3221/1-0040/iio:device0/in_power0_input | sys/bus/i2c/drivers/ina3221x/1-0040/iio:device0/in_power0_input",
+            "status": "unknown",
+            "detail": "no documented power path could be read; hwmon in1_input is voltage, not power"
+        },
+        "gpu_utilization_percent": {
+            "value": 27.1,
+            "source": "sys/devices/platform/gpu.0/load",
+            "status": "ok",
+            "units": "per-mille / 10"
+        }
+    }
+}
